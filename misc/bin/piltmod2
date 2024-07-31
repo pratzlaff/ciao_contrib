@@ -1,0 +1,53 @@
+import numpy as np
+import astropy.io.fits
+from astropy.table import Table
+import argparse
+
+def read_pffile(pffile):
+    factors = np.loadtxt(pffile, unpack=True, usecols=(1,))
+    if factors.size != 576:
+        raise IOError("file '{}' should contain exactly 576 rows".format(pffile))
+    return factors
+
+def piltmod( args ):
+
+    factors = read_pffile(args.pffile)
+
+    hdulist = astropy.io.fits.open( args.infile, memmap=True )
+    data = hdulist['events'].data
+    rawy = data.field('rawy')
+    subtaps = (rawy*3./256).astype(int)
+
+    # Default subtap assignments have rawy % 256 ranges [0:85], [86:170]
+    # and [171:255].
+    #
+    # Brad would like these to be [0:88], [89:166], [167:255]
+    #
+    mod = rawy % 256
+    subtaps[(mod >= 86) & (mod <= 88)] -= 1
+    subtaps[(mod >= 167) & (mod <= 170)] += 1
+
+    pilt = data.field('pilt')
+    pilt /= factors[subtaps]
+    hdulist.writeto(args.outfile, overwrite=True)
+    hdulist.close()
+
+    # t = Table.read(args.infile, format='fits')
+    # pilt = t['pilt']
+    # rawy = t['rawy']
+    # subtaps = (rawy*3./256).astype(int)
+    # t['pilts1'] = pilt * factors[subtaps]
+    # t.write(args.outfile)
+
+def main():
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('infile', help='input FITS file')
+    parser.add_argument('outfile', help='output FITS file')
+    parser.add_argument('--pffile', default='/data/storm/bradw/Gain2017/8TweakVsub/computeDevs.out', help='file with PILT factors')
+    args = parser.parse_args()
+
+    piltmod(args)
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,152 @@
+#! /usr/bin/env python
+
+# 
+# Copyright (C) 2018 Smithsonian Astrophysical Observatory
+# 
+# 
+# 
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License along
+# with this program; if not, write to the Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+#
+
+import sys, os
+sys.path=[os.environ['ASCDS_INSTALL'] + '/ots/lib/python' + ".".join(str(x) for x in sys.version_info[0:2]) + '/site-packages'] + sys.path
+
+"""Usage:
+  piltmod infile outfile
+
+Options:
+
+Aim:
+
+  Multiply PILT column by factors specified in pffile.
+
+"""
+
+toolname = 'piltmod'
+version = '04 April 2018'
+
+import sys
+import numpy as np
+import shutil
+import os
+
+import cxcdm
+import paramio
+import ciao_contrib.logger_wrapper as lw
+from ciao_contrib.runtool import add_tool_history
+from ciao_contrib.logger_wrapper import handle_ciao_errors
+from ciao_contrib.param_wrapper import open_param_file
+
+# Set up the logging/verbose code
+lw.initialize_logger(toolname)
+
+# Use v<n> to display messages at the given verbose level.
+#
+v1 = lw.make_verbose_level(toolname, 1)
+v2 = lw.make_verbose_level(toolname, 2)
+
+def print_version():
+    v1("Running {} version: {}\n".format(toolname, version))
+
+def read_pilt_factor_file(pffile):
+    factors=np.loadtxt(pffile, unpack=True, usecols=(1,))
+    if factors.size != 576:
+        raise IOError("file '{}' should contain exactly 576 rows".format(pffile))
+    return factors
+
+def update_pilt( params ):
+    infile = params['infile']
+    outfile = params['outfile']
+    pffile = params['pffile']
+    clobber = params['clobber']
+
+    v2("Reading PILT factors from '{}'\n".format(pffile))
+    factors = read_pilt_factor_file(pffile)
+
+    if not clobber and os.path.isfile(outfile):
+        raise IOError("outfile={} exists and clobber=no".format(outfile))
+
+    v2("Copying '{}' -> '{}'\n".format(infile, outfile))
+    shutil.copy(infile, outfile)
+
+    v2("Opening {} for update\n".format(outfile))
+    bl = cxcdm.dmTableOpen(outfile, update=True)
+    nrows = cxcdm.dmTableGetNoRows(bl)
+
+    # can we access the columns? In CIAO 4.7 it throws a RuntimeError
+    # with no message if there's no column, so change it
+    v2("Reading RAWY, PILT\n")
+    try:
+        rawy = cxcdm.dmTableOpenColumn(bl, 'rawy')
+        pilt = cxcdm.dmTableOpenColumn(bl, 'pilt')
+    except RuntimeError as e:
+        if str(e).strip() == '':
+            raise ValueError("Unable to open columns RAWY, PILT")
+        else:
+            raise e
+    rawy_vals = cxcdm.dmGetData(rawy, 1, nrows)
+    pilt_vals = cxcdm.dmGetData(pilt, 1, nrows)
+
+    # multiply rawy (1-based) times 3, divide by 256, take int, and
+    # that's the 0-based subtap value
+    v2("Calculating PILTS1\n")
+    subtaps = (rawy_vals*3./256).astype(int)
+
+    # Default subtap assignments have rawy % 256 ranges [0:85], [86:170]
+    # and [171:255].
+    #
+    # Brad would like these to be [0:88], [89:166], [167:255]
+    #
+    mod = rawy % 256
+    subtaps[(mod >= 86) & (mod <= 88)] -= 1
+    subtaps[(mod >= 167) & (mod <= 170)] += 1 
+
+    pilts1_vals = pilt_vals / factors[subtaps]
+
+    v2("Creating PILTS1\n")
+    cxcdm.dmColumnCreate( bl, "PILTS1", np.float64)
+    pilts1 = cxcdm.dmTableOpenColumn(bl, 'pilts1')
+
+    v2("Updating PILTS1\n")
+    cxcdm.dmSetData(pilts1, pilts1_vals)
+
+    v2("Closing '{}'\n".format(outfile))
+    cxcdm.dmTableClose(bl)
+
+def process_command_line(argv):
+    pinfo = open_param_file(argv, toolname=toolname)
+    fp = pinfo['fp']
+    params = {
+        'infile' : paramio.pgetstr(fp, 'infile'),
+        'outfile' : paramio.pgetstr(fp, 'outfile'),
+        'pffile' : paramio.pgetstr(fp, 'pffile'),
+        'clobber' : paramio.pgetb(fp, 'clobber')==1,
+        'verbose' : paramio.pgeti(fp, 'verbose'),
+    }
+    paramio.paramclose(fp)
+    lw.set_verbosity(params['verbose'])
+    return params
+
+@lw.handle_ciao_errors(toolname, version) # top-level routine
+def piltmod(argv):
+    params = process_command_line(argv)
+    print_version()
+    update_pilt( params );
+
+    v2("Adding HISTORY entry to %s\n" % params['outfile'])
+    add_tool_history(params['outfile'], toolname, params, toolversion=version)
+
+if __name__ == '__main__':
+    piltmod(sys.argv)
